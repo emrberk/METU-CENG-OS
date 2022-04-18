@@ -11,31 +11,18 @@
 
 using namespace std;
 
+vector<char*> allocatedCharp;
+
 char* stocp(string& s) {
     int size = s.size();
     int i;
     char* charp = (char*) malloc((size + 1) * sizeof(char));
-    for (i = 0; i < s.size(); i++) {
+    for (i = 0; i < size; i++) {
         charp[i] = s[i];
     }
     charp[i] = '\0';
+    allocatedCharp.push_back(charp);
     return charp;
-}
-string cptos(char* cptr) {
-    string newstr;
-    for (char* it = cptr; *it != '\0'; it++) {
-        newstr.push_back(*it);
-    }
-    return newstr;
-}
-
-int charArraySize(char* input) {
-    int size = 0;
-    char* i;
-    for (i = input; *i != '\0'; i++) {
-        size++;
-    }
-    return size;
 }
 
 class Process {
@@ -43,20 +30,18 @@ private:
     string commandName;
     char* outputDir;
     char* inputDir;
-    char* repeaterInput;
 public:
     vector<string> args; 
     Process(string commandName) {
         this->commandName = commandName;
+        this->inputDir = nullptr;
+        this->outputDir = nullptr;
     }
     void setInputDir(char* inputDir) {
         this->inputDir = inputDir;
     }
     void setOutputDir(char* outputDir) {
         this->outputDir = outputDir;
-    }
-    void setRepeaterInput(char* repeaterInput) {
-        this->repeaterInput = repeaterInput;
     }
     void run() {
         int fd[2];
@@ -78,7 +63,7 @@ public:
         }
         arg[args.size() + 1] = NULL; // last element should be null
         execvp(command, arg);
-        perror("Process could not be executed.\n");
+        perror("Process could not be executed.");
     }
 };
 
@@ -87,14 +72,12 @@ private:
     string name;
     char* outputDir;
     char* inputDir;
-    char* repeaterInput;
 public:
     vector<Process*> processes;
     Bundle(string name) {
         this->name = name;
-    }
-    char* getInputDir() {
-        return this->inputDir;
+        this->outputDir = nullptr;
+        this->inputDir = nullptr;
     }
     void setInputDir(char* inputDir) {
         this->inputDir = inputDir;
@@ -102,28 +85,22 @@ public:
             processes[i]->setInputDir(inputDir);
         }
     }
-    char* getOutputDir() {
-        return this->outputDir;
-    }
     void setOutputDir(char* outputDir) {
         this->outputDir = outputDir;
         for (int i = 0; i < processes.size(); i++) {
             processes[i]->setOutputDir(outputDir);
         }
     }
-    char* getRepeaterInput() {
-        return this->repeaterInput;
-    }
-    void setRepeaterInput(char* repeaterInput) {
-        this->repeaterInput = repeaterInput;
-    }
-    void runProcesses() {
+    void runProcesses(bool first) {
         int runningProcessCount = 0;
+        int numProcesses = processes.size();
         int status;
         int pid;
-        int pid2;
-        int fd[2];
-        for (int i = 0; i < processes.size(); i++) {
+        int multipleFd[numProcesses][2];
+        for (int i = 0; i < numProcesses; i++) {
+            pipe(multipleFd[i]);
+        }
+        for (int i = 0; i < numProcesses; i++) {
             if (inputDir) {
                 processes[i]->setInputDir(inputDir);
             } 
@@ -132,100 +109,39 @@ public:
             }
             pid = fork();
             if (pid == 0) {
-                if (repeaterInput) { // stream repeater input to processes
-                    int status2;
-                    pipe(fd);
-                    pid2 = fork();
-                    if (pid2 == 0) { // stream contents to pipe
-                        close(fd[0]);
-                        int size = charArraySize(repeaterInput);
-                        write(fd[1], repeaterInput, size);
-                        close(fd[1]);
-                        exit(0);
-                    } else if (pid2 > 0) { // input processes will take this stream from their stdin
-                        close(fd[1]);
-                        dup2(fd[0], 0);
-                        close(fd[0]);
-                        wait(&status2);
-                        processes[i]->run();
-                    } else {
-                        perror("Error on creating fork.\n");
-                    }
-                } else { // the bundle is the last (or only) element in the pipe.
-                    processes[i]->run();
+                dup2(multipleFd[i][0], 0);
+                for (int j = 0; j < numProcesses; j++) {
+                    close(multipleFd[j][0]);
+                    close(multipleFd[j][1]);
                 }
+                processes[i]->run();
             } else if (pid < 0) {
-                perror("Error on creating fork.\n");
-            } else {
-                runningProcessCount++;
+                perror("Error on creating fork.");
             }
         }
-        while (runningProcessCount) { // loop until all processes terminate
-            pid = wait(&status);
-            runningProcessCount--;
+        for (int i = 0; i < numProcesses; i++) {
+            close(multipleFd[i][0]);
+        }
+        if (!first) {
+            int readCharCount = 0;
+            char currentChar[10];
+            while ((readCharCount = read(0, currentChar, 10)) > 0) {
+                for (int k = 0; k < numProcesses; k++) {
+                    write(multipleFd[k][1], currentChar, readCharCount);
+                }
+            }
+        }
+        for (int i = 0; i < numProcesses; i++) {
+            close(multipleFd[i][1]);
+        }
+        int numForks = numProcesses;
+        while (numForks) {
+            wait(&status);
+            numForks--;
         }
         setInputDir(nullptr);
         setOutputDir(nullptr);
-        setRepeaterInput(nullptr);
-    }
-};
-
-class Repeater {
-private:
-    Bundle* inputBundle;
-    Bundle* outputBundle;
-    char* contents;
-public:
-    Repeater(Bundle* inputBundle, Bundle* outputBundle) {
-        this->inputBundle = inputBundle;
-        this->outputBundle = outputBundle;
-    }
-    void setInputBundle(Bundle* inputBundle) {
-        this->inputBundle = inputBundle;
-    }
-    Bundle* getInputBundle() {
-        return this->inputBundle;
-    }
-    void setOuputBundle(Bundle* outputBundle) {
-        this->outputBundle = outputBundle;
-    }
-    Bundle* getOutputBundle() {
-        return this->outputBundle;
-    }
-    char* getContents() {
-        return this->contents;
-    }
-    void setContents(char* contents) {
-        this->contents = contents;
-    }
-    void redirectStream() {
-        int fd[2];
-        int status;
-        pipe(fd);
-        int forkPid = fork(); 
-        if (forkPid == 0) { // run source
-            close(fd[0]);
-            dup2(fd[1], 1);
-            close(fd[1]);
-            inputBundle->runProcesses(); // inputBundle will write to its stdout.
-            exit(0);
-        } else if (forkPid > 0) { // take contents
-            close(fd[1]);
-            wait(&status);
-            std::string buffer;
-            int readCharCount = 0;
-            char currentChar[10];
-            while ((readCharCount = read(fd[0], currentChar, 10)) > 0) {
-                for (int i = 0; i < readCharCount; i++) {
-                    buffer.push_back(currentChar[i]);
-                }
-            }
-            this->contents = stocp(buffer);
-            outputBundle->setRepeaterInput(this->contents); // give contents to the next bundle
-            close(fd[0]);
-        } else {
-            perror("Error on fork.\n");
-        }
+        exit(0);
     }
 };
 
@@ -246,7 +162,7 @@ int main() {
         parse(charp, creation, pi);
         if (pi->command.type == PROCESS_BUNDLE_CREATE) {
             creation = 1;
-            string bundleName = cptos(pi->command.bundle_name);
+            string bundleName = pi->command.bundle_name;
             currentBundle = new Bundle(bundleName);
             bundles.push_back(currentBundle);
             nameMap[bundleName] = bundles.size() - 1;
@@ -254,6 +170,16 @@ int main() {
             creation = 0;
         } else if (pi->command.type == QUIT) {
             quit = true;
+            delete pi;
+            for (int i = 0; i < allocatedCharp.size(); i++) {
+                delete allocatedCharp[i];
+            }
+            for (int i = 0; i < bundles.size(); i++) {
+                for (int j = 0; j < bundles[i]->processes.size(); j++) {
+                    delete bundles[i]->processes[j];
+                }
+                delete bundles[i];
+            }
         } else if (pi->command.type != PROCESS_BUNDLE_EXECUTION) { // command
             currentProcess = new Process(pi->argv[0]);
             for (int i = 1; pi->argv[i] != nullptr; i++) {
@@ -262,7 +188,8 @@ int main() {
             currentBundle->processes.push_back(currentProcess);
         } else { // execution
             vector<Bundle*> executionList;
-            vector<Repeater*> repeaters;
+            int numBundles;
+            int status;
             for (int i = 0; i < pi->command.bundle_count; i++) {
                 Bundle* addedBundle = bundles[nameMap[pi->command.bundles[i].name]];
                 if (pi->command.bundles[i].input) {
@@ -273,15 +200,47 @@ int main() {
                 }
                 executionList.push_back(addedBundle);
             }
-            for (int i = 0; i < executionList.size() - 1; i++) {
-                Repeater* rep = new Repeater(executionList[i], executionList[i+1]);
-                repeaters.push_back(rep);
+            
+            int multipleFd[executionList.size()][2];
+            for (int i = 0; i < executionList.size(); i++) {
+                pipe(multipleFd[i]);
             }
-            for (int i = 0; i < repeaters.size(); i++) {
-                repeaters[i]->redirectStream();
+            for (int i = 0; i < executionList.size(); i++) {
+                int forkPid = fork();
+                if (forkPid == 0) {
+                    if (i != 0) {
+                        dup2(multipleFd[i - 1][0], 0);
+                    }
+                    dup2(multipleFd[i][1], 1);
+                    for (int j = 0; j < executionList.size(); j++) {
+                        close(multipleFd[j][0]);
+                        close(multipleFd[j][1]);
+                    }
+                    executionList[i]->runProcesses(i == 0);
+                } 
             }
-            executionList[executionList.size() - 1]->runProcesses();
+            for (int i = 0; i < executionList.size(); i++) {
+                if (i != executionList.size() - 1) {
+                    close(multipleFd[i][0]);
+                }
+                close(multipleFd[i][1]);
+            }
+            int readCharCount = 0;
+            char currentChar[10];
+            while ((readCharCount = read(multipleFd[executionList.size() - 1][0], currentChar, 10)) > 0) {
+                for (int i = 0; i < readCharCount; i++) {
+                    write(1, currentChar + i, 1);
+                }
+            }
+            close(multipleFd[executionList.size() - 1][0]);
+            int totalFork = executionList.size();
+            while (totalFork) {
+                wait(&status);
+                totalFork--;
+            }
+            fflush(stdout);
         }
     }
+
     return 0;
 }
